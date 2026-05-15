@@ -1,10 +1,13 @@
+# 06_find_close_unit_category_pairs.py
+
 import numpy as np
 import pandas as pd
 from sklearn.metrics.pairwise import cosine_similarity
 
 
 NPZ_PATH = "processed/embeddings/call_embeddings.npz"
-OUTPUT_PATH = "processed/top5_close_category_pairs.csv"
+OUTPUT_PATH = "processed/top5_close_unit_category_pairs.csv"
+TOP_K = 5
 
 
 def normalize_vectors(vectors: np.ndarray) -> np.ndarray:
@@ -17,38 +20,53 @@ def main():
     npz = np.load(NPZ_PATH, allow_pickle=True)
 
     vectors = npz["vectors"]
-    categories = npz["categories"]
-    units = npz["units"]
-    doc_types = npz["doc_types"]
     call_ids = npz["call_ids"]
+    units = npz["units"]
+    categories = npz["categories"]
+    doc_types = npz["doc_types"]
 
     df = pd.DataFrame({
         "call_id": call_ids,
         "unit": units,
-        "doc_type": doc_types,
         "category": categories,
+        "doc_type": doc_types,
         "idx": range(len(categories)),
     })
 
-    category_vectors = {}
+    # 用 (unit, category) 當作一個類別 identity
+    prototypes = []
 
-    for category, group in df.groupby("category"):
+    for (unit, category), group in df.groupby(["unit", "category"]):
         idxs = group["idx"].tolist()
-        category_vectors[category] = vectors[idxs].mean(axis=0)
+        proto_vector = vectors[idxs].mean(axis=0)
 
-    category_names = list(category_vectors.keys())
-    category_matrix = np.vstack([category_vectors[c] for c in category_names])
-    category_matrix = normalize_vectors(category_matrix)
+        prototypes.append({
+            "unit": unit,
+            "category": category,
+            "sample_count": len(idxs),
+            "vector": proto_vector,
+        })
 
-    sim_matrix = cosine_similarity(category_matrix)
+    proto_df = pd.DataFrame(prototypes)
+
+    proto_vectors = np.vstack(proto_df["vector"].to_numpy())
+    proto_vectors = normalize_vectors(proto_vectors)
+
+    sim_matrix = cosine_similarity(proto_vectors)
 
     pairs = []
 
-    for i in range(len(category_names)):
-        for j in range(i + 1, len(category_names)):
+    for i in range(len(proto_df)):
+        for j in range(i + 1, len(proto_df)):
             pairs.append({
-                "category_1": category_names[i],
-                "category_2": category_names[j],
+                "unit_1": proto_df.loc[i, "unit"],
+                "category_1": proto_df.loc[i, "category"],
+                "sample_count_1": int(proto_df.loc[i, "sample_count"]),
+
+                "unit_2": proto_df.loc[j, "unit"],
+                "category_2": proto_df.loc[j, "category"],
+                "sample_count_2": int(proto_df.loc[j, "sample_count"]),
+
                 "cosine_similarity": float(sim_matrix[i, j]),
                 "cosine_distance": float(1 - sim_matrix[i, j]),
             })
@@ -56,11 +74,16 @@ def main():
     result = pd.DataFrame(pairs)
     result = result.sort_values("cosine_similarity", ascending=False)
 
-    top5 = result.head(5)
-    top5.to_csv(OUTPUT_PATH, index=False, encoding="utf-8-sig")
+    top_k_result = result.head(TOP_K)
 
-    print("Top 5 closest category pairs:")
-    print(top5)
+    top_k_result.to_csv(
+        OUTPUT_PATH,
+        index=False,
+        encoding="utf-8-sig"
+    )
+
+    print(f"Top {TOP_K} closest (unit, category) pairs:")
+    print(top_k_result)
     print(f"\nSaved to: {OUTPUT_PATH}")
 
 
