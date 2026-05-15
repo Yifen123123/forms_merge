@@ -1,55 +1,68 @@
-import json
 import numpy as np
 import pandas as pd
 from sklearn.metrics.pairwise import cosine_similarity
 
-# 讀資料
-with open("processed/classifier_dataset.json", "r", encoding="utf-8") as f:
-    dataset = json.load(f)
 
-embeddings = np.load("processed/embeddings.npy")
+NPZ_PATH = "processed/embeddings/call_embeddings.npz"
+OUTPUT_PATH = "processed/top5_close_category_pairs.csv"
 
-# 取得 label
-labels = [item["category"] for item in dataset]
 
-# 如果同一類有多筆，取平均作為 category prototype
-df = pd.DataFrame({
-    "label": labels,
-    "idx": range(len(labels))
-})
+def normalize_vectors(vectors: np.ndarray) -> np.ndarray:
+    norms = np.linalg.norm(vectors, axis=1, keepdims=True)
+    norms[norms == 0] = 1
+    return vectors / norms
 
-category_vectors = {}
 
-for label, group in df.groupby("label"):
-    idxs = group["idx"].tolist()
-    category_vectors[label] = embeddings[idxs].mean(axis=0)
+def main():
+    npz = np.load(NPZ_PATH, allow_pickle=True)
 
-categories = list(category_vectors.keys())
-vectors = np.vstack([category_vectors[c] for c in categories])
+    vectors = npz["vectors"]
+    categories = npz["categories"]
+    units = npz["units"]
+    doc_types = npz["doc_types"]
+    call_ids = npz["call_ids"]
 
-# normalize
-vectors = vectors / np.linalg.norm(vectors, axis=1, keepdims=True)
+    df = pd.DataFrame({
+        "call_id": call_ids,
+        "unit": units,
+        "doc_type": doc_types,
+        "category": categories,
+        "idx": range(len(categories)),
+    })
 
-# 計算 cosine similarity
-sim_matrix = cosine_similarity(vectors)
+    category_vectors = {}
 
-pairs = []
+    for category, group in df.groupby("category"):
+        idxs = group["idx"].tolist()
+        category_vectors[category] = vectors[idxs].mean(axis=0)
 
-for i in range(len(categories)):
-    for j in range(i + 1, len(categories)):
-        pairs.append({
-            "category_1": categories[i],
-            "category_2": categories[j],
-            "cosine_similarity": sim_matrix[i, j],
-            "cosine_distance": 1 - sim_matrix[i, j],
-        })
+    category_names = list(category_vectors.keys())
+    category_matrix = np.vstack([category_vectors[c] for c in category_names])
+    category_matrix = normalize_vectors(category_matrix)
 
-result = pd.DataFrame(pairs)
-result = result.sort_values("cosine_similarity", ascending=False)
+    sim_matrix = cosine_similarity(category_matrix)
 
-# 取 top 5 最接近
-top5 = result.head(5)
+    pairs = []
 
-top5.to_csv("processed/top5_close_category_pairs.csv", index=False, encoding="utf-8-sig")
+    for i in range(len(category_names)):
+        for j in range(i + 1, len(category_names)):
+            pairs.append({
+                "category_1": category_names[i],
+                "category_2": category_names[j],
+                "cosine_similarity": float(sim_matrix[i, j]),
+                "cosine_distance": float(1 - sim_matrix[i, j]),
+            })
 
-print(top5)
+    result = pd.DataFrame(pairs)
+    result = result.sort_values("cosine_similarity", ascending=False)
+
+    top5 = result.head(5)
+    top5.to_csv(OUTPUT_PATH, index=False, encoding="utf-8-sig")
+
+    print("Top 5 closest category pairs:")
+    print(top5)
+    print(f"\nSaved to: {OUTPUT_PATH}")
+
+
+if __name__ == "__main__":
+    main()
