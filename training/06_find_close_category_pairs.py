@@ -86,6 +86,15 @@ def main():
     print(top_k_result)
     print(f"\nSaved to: {OUTPUT_PATH}")
 
+    plt.figure(figsize=(10, 6))
+    plt.hist(result["cosine_similarity"], bins=30, edgecolor="black")
+    plt.xlabel("Cosine Similarity")
+    plt.ylabel("Number of Category Pairs")
+    plt.title("Distribution of Cosine Similarity Between Category Pairs")
+    plt.grid(axis="y", alpha=0.3)
+    plt.tight_layout()
+    plt.savefig("processed/cosine_similarity_distribution.png", dpi=300)
+    plt.show()
 
 if __name__ == "__main__":
     main()
