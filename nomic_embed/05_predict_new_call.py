@@ -17,6 +17,57 @@ FAISS_METADATA_PATH = Path("processed/faiss/faiss_metadata_nomic.json")
 
 TOP_K = 5
 
+MAX_CHARS_NO_CHUNK = 1500
+CHUNK_SIZE = 1500
+STRIDE = 750
+FALLBACK_CHUNK_SIZE = 800
+
+
+def get_position_weight(chunk_center_ratio: float) -> float:
+    if chunk_center_ratio < 0.3:
+        return 0.9
+    elif chunk_center_ratio < 0.7:
+        return 1.2
+    else:
+        return 1.0
+
+
+def chunk_text_by_chars(text: str) -> tuple[list[str], list[float]]:
+    if len(text) <= MAX_CHARS_NO_CHUNK:
+        return [text], [1.0]
+
+    chunks = []
+    weights = []
+
+    total_len = len(text)
+    start = 0
+
+    while start < total_len:
+        end = min(start + CHUNK_SIZE, total_len)
+        chunk = text[start:end].strip()
+
+        if chunk:
+            center = (start + end) / 2
+            center_ratio = center / total_len
+
+            chunks.append(chunk)
+            weights.append(get_position_weight(center_ratio))
+
+        if end == total_len:
+            break
+
+        start += STRIDE
+
+    return chunks, weights
+
+
+def split_fallback_chunks(text: str) -> list[str]:
+    return [
+        text[i:i + FALLBACK_CHUNK_SIZE].strip()
+        for i in range(0, len(text), FALLBACK_CHUNK_SIZE)
+        if text[i:i + FALLBACK_CHUNK_SIZE].strip()
+    ]
+
 
 def normalize_vector(vector: np.ndarray) -> np.ndarray:
     norm = np.linalg.norm(vector)
@@ -27,20 +78,89 @@ def normalize_vector(vector: np.ndarray) -> np.ndarray:
     return vector / norm
 
 
-def build_call_vector(text: str) -> tuple[np.ndarray, int]:
+def normalize_vectors(vectors: np.ndarray) -> np.ndarray:
+    norms = np.linalg.norm(vectors, axis=1, keepdims=True)
+    norms[norms == 0] = 1
+
+    return vectors / norms
+
+
+def weighted_average(vectors: np.ndarray, weights: list[float]) -> np.ndarray:
+    weights = np.array(weights, dtype=np.float32)
+    weights = weights / weights.sum()
+
+    return np.sum(vectors * weights[:, None], axis=0)
+
+
+def embed_single_text_with_ollama(text: str) -> np.ndarray:
     response = ollama.embed(
         model=MODEL_NAME,
         input=text
     )
 
-    vector = np.array(
-        response["embeddings"][0],
-        dtype=np.float32
-    )
+    vector = np.array(response["embeddings"][0], dtype=np.float32)
 
-    vector = normalize_vector(vector)
+    if vector.ndim != 1:
+        raise ValueError(f"Ollama 回傳單筆 embedding 維度異常：{vector.shape}")
 
-    return vector.astype("float32"), 1
+    return vector
+
+
+def embed_texts_with_ollama(texts: list[str]) -> np.ndarray:
+    vectors = []
+
+    for idx, text in enumerate(texts, start=1):
+        try:
+            print(f"  embedding chunk {idx}/{len(texts)}, chars={len(text)}")
+
+            vector = embed_single_text_with_ollama(text)
+            vectors.append(vector)
+
+        except Exception as e:
+            print(f"  chunk {idx} embedding 失敗，改用 fallback 切更小段")
+            print(f"  chunk chars={len(text)}")
+            print(f"  error={e}")
+
+            sub_chunks = split_fallback_chunks(text)
+
+            if not sub_chunks:
+                raise ValueError("fallback 後沒有任何可 embedding 的文字")
+
+            sub_vectors = []
+
+            for sub_idx, sub_text in enumerate(sub_chunks, start=1):
+                print(
+                    f"    embedding sub-chunk {sub_idx}/{len(sub_chunks)}, "
+                    f"chars={len(sub_text)}"
+                )
+
+                sub_vector = embed_single_text_with_ollama(sub_text)
+                sub_vectors.append(sub_vector)
+
+            sub_vectors = np.vstack(sub_vectors).astype("float32")
+            sub_vectors = normalize_vectors(sub_vectors)
+
+            vector = np.mean(sub_vectors, axis=0)
+            vector = normalize_vector(vector)
+
+            vectors.append(vector)
+
+    return np.vstack(vectors).astype("float32")
+
+
+def build_call_vector(text: str) -> tuple[np.ndarray, int]:
+    chunks, weights = chunk_text_by_chars(text)
+
+    if not chunks:
+        raise ValueError("輸入文字切 chunk 後沒有任何內容")
+
+    chunk_vectors = embed_texts_with_ollama(chunks)
+    chunk_vectors = normalize_vectors(chunk_vectors)
+
+    call_vector = weighted_average(chunk_vectors, weights)
+    call_vector = normalize_vector(call_vector)
+
+    return call_vector.astype("float32"), len(chunks)
 
 
 def predict_with_svm(vector: np.ndarray, clf, label_encoder):
@@ -85,7 +205,7 @@ def search_similar_cases(vector: np.ndarray, top_k: int):
             "unit": item.get("unit", ""),
             "category": item.get("category", ""),
             "similarity": float(score),
-            "num_chunks": item.get("num_chunks", 1),
+            "num_chunks": item.get("num_chunks"),
             "embedding_model": item.get("embedding_model", MODEL_NAME),
         })
 
@@ -135,6 +255,9 @@ def main():
     clf = joblib.load(SVM_MODEL_PATH)
     label_encoder = joblib.load(LABEL_ENCODER_PATH)
 
+    print(f"讀取新通話：{input_path}")
+    print(f"文字長度：{len(text)} chars")
+
     vector, num_chunks = build_call_vector(text)
 
     pred_label, confidence = predict_with_svm(
@@ -151,8 +274,9 @@ def main():
     result = {
         "input_file": str(input_path),
         "embedding_model": MODEL_NAME,
-        "chunk_method": "no_chunk_full_text",
+        "chunk_method": "safe_char_chunk_with_fallback",
         "num_chunks": num_chunks,
+        "text_length_chars": len(text),
         "svm_prediction": {
             "label_name": pred_label,
             "confidence": confidence
