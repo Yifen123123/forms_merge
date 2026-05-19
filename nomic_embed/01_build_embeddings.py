@@ -10,12 +10,13 @@ OUTPUT_DIR = Path("processed/embeddings")
 
 MODEL_NAME = "nomic-embed-text"
 
-EMBEDDINGS_PATH = OUTPUT_DIR / "call_embeddings_nomic_hybrid.npz"
-METADATA_PATH = OUTPUT_DIR / "embedding_metadata_nomic_hybrid.json"
+EMBEDDINGS_PATH = OUTPUT_DIR / "call_embeddings_nomic_safe_chunk.npz"
+METADATA_PATH = OUTPUT_DIR / "embedding_metadata_nomic_safe_chunk.json"
 
-MAX_CHARS_NO_CHUNK = 3000
-CHUNK_SIZE = 3000
-STRIDE = 1500
+MAX_CHARS_NO_CHUNK = 1500
+CHUNK_SIZE = 1500
+STRIDE = 750
+FALLBACK_CHUNK_SIZE = 800
 
 
 def load_json(path: Path):
@@ -97,18 +98,68 @@ def weighted_average(vectors: np.ndarray, weights: list[float]) -> np.ndarray:
     return np.sum(vectors * weights[:, None], axis=0)
 
 
-def embed_texts_with_ollama(texts: list[str]) -> np.ndarray:
+def embed_single_text_with_ollama(text: str) -> np.ndarray:
     response = ollama.embed(
         model=MODEL_NAME,
-        input=texts
+        input=text
     )
 
-    vectors = np.array(response["embeddings"], dtype=np.float32)
+    vector = np.array(response["embeddings"][0], dtype=np.float32)
 
-    if vectors.ndim != 2:
-        raise ValueError(f"Ollama 回傳 embedding 維度異常：{vectors.shape}")
+    if vector.ndim != 1:
+        raise ValueError(f"Ollama 回傳單筆 embedding 維度異常：{vector.shape}")
 
-    return vectors
+    return vector
+
+
+def split_fallback_chunks(text: str) -> list[str]:
+    return [
+        text[i:i + FALLBACK_CHUNK_SIZE]
+        for i in range(0, len(text), FALLBACK_CHUNK_SIZE)
+        if text[i:i + FALLBACK_CHUNK_SIZE].strip()
+    ]
+
+
+def embed_texts_with_ollama(texts: list[str]) -> np.ndarray:
+    vectors = []
+
+    for idx, text in enumerate(texts, start=1):
+        try:
+            print(f"  embedding chunk {idx}/{len(texts)}, chars={len(text)}")
+
+            vector = embed_single_text_with_ollama(text)
+            vectors.append(vector)
+
+        except Exception as e:
+            print(f"  chunk {idx} embedding 失敗，改用 fallback 切更小段")
+            print(f"  chunk chars={len(text)}")
+            print(f"  error={e}")
+
+            sub_chunks = split_fallback_chunks(text)
+
+            if not sub_chunks:
+                raise ValueError("fallback 後沒有任何可 embedding 的文字")
+
+            sub_vectors = []
+
+            for sub_idx, sub_text in enumerate(sub_chunks, start=1):
+                print(
+                    f"    embedding sub-chunk {sub_idx}/{len(sub_chunks)}, "
+                    f"chars={len(sub_text)}"
+                )
+
+                sub_vector = embed_single_text_with_ollama(sub_text)
+                sub_vectors.append(sub_vector)
+
+            sub_vectors = np.vstack(sub_vectors).astype("float32")
+            sub_vectors = normalize_vectors(sub_vectors)
+
+            vector = np.mean(sub_vectors, axis=0)
+            vector = normalize_vector(vector)
+
+            vectors.append(vector)
+
+    return np.vstack(vectors).astype("float32")
 
 
 def build_call_vector(text: str) -> tuple[np.ndarray, int, list[float]]:
@@ -141,7 +192,7 @@ def main():
         call_id = item["call_id"]
         label_name = item["label_name"]
 
-        print(f"[{idx}/{len(dataset)}] embedding call_id={call_id}")
+        print(f"\n[{idx}/{len(dataset)}] embedding call_id={call_id}")
 
         text = read_call_text(call_id)
 
@@ -161,13 +212,14 @@ def main():
             "unit": item.get("unit", ""),
             "category": item.get("category", ""),
             "embedding_model": MODEL_NAME,
-            "chunk_method": "hybrid_no_chunk_or_char_chunk",
+            "chunk_method": "safe_char_chunk_with_fallback",
             "num_chunks": num_chunks,
             "chunk_weights": weights,
             "text_length_chars": len(text),
             "max_chars_no_chunk": MAX_CHARS_NO_CHUNK,
             "chunk_size": CHUNK_SIZE,
             "stride": STRIDE,
+            "fallback_chunk_size": FALLBACK_CHUNK_SIZE,
         })
 
     vectors = np.vstack(all_vectors).astype("float32")
@@ -185,7 +237,7 @@ def main():
     with METADATA_PATH.open("w", encoding="utf-8") as f:
         json.dump(metadata, f, ensure_ascii=False, indent=2)
 
-    print("\nNomic hybrid embedding 建立完成")
+    print("\nNomic safe chunk embedding 建立完成")
     print(f"向量檔案：{EMBEDDINGS_PATH}")
     print(f"metadata：{METADATA_PATH}")
     print(f"vectors shape: {vectors.shape}")
