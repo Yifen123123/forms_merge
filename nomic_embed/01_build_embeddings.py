@@ -10,8 +10,12 @@ OUTPUT_DIR = Path("processed/embeddings")
 
 MODEL_NAME = "nomic-embed-text"
 
-EMBEDDINGS_PATH = OUTPUT_DIR / "call_embeddings_nomic_no_chunk.npz"
-METADATA_PATH = OUTPUT_DIR / "embedding_metadata_nomic_no_chunk.json"
+EMBEDDINGS_PATH = OUTPUT_DIR / "call_embeddings_nomic_hybrid.npz"
+METADATA_PATH = OUTPUT_DIR / "embedding_metadata_nomic_hybrid.json"
+
+MAX_CHARS_NO_CHUNK = 3000
+CHUNK_SIZE = 3000
+STRIDE = 1500
 
 
 def load_json(path: Path):
@@ -33,6 +37,43 @@ def read_call_text(call_id: str) -> str:
     return text
 
 
+def get_position_weight(chunk_center_ratio: float) -> float:
+    if chunk_center_ratio < 0.3:
+        return 0.9
+    elif chunk_center_ratio < 0.7:
+        return 1.2
+    else:
+        return 1.0
+
+
+def chunk_text_by_chars(text: str):
+    if len(text) <= MAX_CHARS_NO_CHUNK:
+        return [text], [1.0]
+
+    chunks = []
+    weights = []
+
+    total_len = len(text)
+    start = 0
+
+    while start < total_len:
+        end = min(start + CHUNK_SIZE, total_len)
+        chunk = text[start:end]
+
+        center = (start + end) / 2
+        center_ratio = center / total_len
+
+        chunks.append(chunk)
+        weights.append(get_position_weight(center_ratio))
+
+        if end == total_len:
+            break
+
+        start += STRIDE
+
+    return chunks, weights
+
+
 def normalize_vector(vector: np.ndarray) -> np.ndarray:
     norm = np.linalg.norm(vector)
 
@@ -42,16 +83,44 @@ def normalize_vector(vector: np.ndarray) -> np.ndarray:
     return vector / norm
 
 
-def embed_text_with_ollama(text: str) -> np.ndarray:
+def normalize_vectors(vectors: np.ndarray) -> np.ndarray:
+    norms = np.linalg.norm(vectors, axis=1, keepdims=True)
+    norms[norms == 0] = 1
+
+    return vectors / norms
+
+
+def weighted_average(vectors: np.ndarray, weights: list[float]) -> np.ndarray:
+    weights = np.array(weights, dtype=np.float32)
+    weights = weights / weights.sum()
+
+    return np.sum(vectors * weights[:, None], axis=0)
+
+
+def embed_texts_with_ollama(texts: list[str]) -> np.ndarray:
     response = ollama.embed(
         model=MODEL_NAME,
-        input=text
+        input=texts
     )
 
-    vector = np.array(response["embeddings"][0], dtype=np.float32)
-    vector = normalize_vector(vector)
+    vectors = np.array(response["embeddings"], dtype=np.float32)
 
-    return vector.astype("float32")
+    if vectors.ndim != 2:
+        raise ValueError(f"Ollama 回傳 embedding 維度異常：{vectors.shape}")
+
+    return vectors
+
+
+def build_call_vector(text: str) -> tuple[np.ndarray, int, list[float]]:
+    chunks, weights = chunk_text_by_chars(text)
+
+    chunk_vectors = embed_texts_with_ollama(chunks)
+    chunk_vectors = normalize_vectors(chunk_vectors)
+
+    call_vector = weighted_average(chunk_vectors, weights)
+    call_vector = normalize_vector(call_vector)
+
+    return call_vector.astype("float32"), len(chunks), weights
 
 
 def main():
@@ -76,7 +145,7 @@ def main():
 
         text = read_call_text(call_id)
 
-        call_vector = embed_text_with_ollama(text)
+        call_vector, num_chunks, weights = build_call_vector(text)
 
         all_vectors.append(call_vector)
         all_call_ids.append(call_id)
@@ -92,9 +161,13 @@ def main():
             "unit": item.get("unit", ""),
             "category": item.get("category", ""),
             "embedding_model": MODEL_NAME,
-            "chunk_method": "no_chunk_full_text",
-            "num_chunks": 1,
+            "chunk_method": "hybrid_no_chunk_or_char_chunk",
+            "num_chunks": num_chunks,
+            "chunk_weights": weights,
             "text_length_chars": len(text),
+            "max_chars_no_chunk": MAX_CHARS_NO_CHUNK,
+            "chunk_size": CHUNK_SIZE,
+            "stride": STRIDE,
         })
 
     vectors = np.vstack(all_vectors).astype("float32")
@@ -112,7 +185,7 @@ def main():
     with METADATA_PATH.open("w", encoding="utf-8") as f:
         json.dump(metadata, f, ensure_ascii=False, indent=2)
 
-    print("\nNomic embedding 建立完成")
+    print("\nNomic hybrid embedding 建立完成")
     print(f"向量檔案：{EMBEDDINGS_PATH}")
     print(f"metadata：{METADATA_PATH}")
     print(f"vectors shape: {vectors.shape}")
