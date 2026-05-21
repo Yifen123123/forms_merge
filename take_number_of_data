@@ -1,0 +1,84 @@
+import pandas as pd
+import math
+
+INPUT_CSV = "case_type_stats.csv"
+OUTPUT_CSV = "data_request_plan.csv"
+
+# 你預計第一輪總共想要多少筆資料
+TARGET_TOTAL = 1000
+
+# 每類最多不超過多少筆，避免熱門類別吃掉太多名額
+MAX_PER_CLASS = 150
+
+# 每類最低希望拿到多少筆
+MIN_PER_CLASS = 20
+
+
+def decide_request_count(row):
+    yearly_count = int(row["NUMBERS"])
+    percent = float(row["PERCENT"])
+
+    # 如果一年總量比最低門檻還少，就全拿
+    if yearly_count <= MIN_PER_CLASS:
+        return yearly_count, "低頻類別，建議全拿"
+
+    # 依照比例計算理論需求量
+    proportional_count = math.ceil(TARGET_TOTAL * percent)
+
+    # 加入最低門檻與最高上限
+    request_count = max(proportional_count, MIN_PER_CLASS)
+    request_count = min(request_count, MAX_PER_CLASS)
+
+    # 不能超過近一年實際數量
+    request_count = min(request_count, yearly_count)
+
+    if yearly_count >= 1000:
+        reason = "高頻類別，依比例取樣並設定上限"
+    elif yearly_count >= 500:
+        reason = "中高頻類別，依比例取樣"
+    elif yearly_count >= 100:
+        reason = "中頻類別，保留足夠訓練樣本"
+    else:
+        reason = "低頻類別，至少取得基本訓練量"
+
+    return request_count, reason
+
+
+def main():
+    df = pd.read_csv(INPUT_CSV)
+
+    required_columns = ["UNIT_NAME", "TYPE_NAME", "NUMBERS", "PERCENT", "PERCENT_STR"]
+    for col in required_columns:
+        if col not in df.columns:
+            raise ValueError(f"缺少必要欄位：{col}")
+
+    results = df.apply(decide_request_count, axis=1, result_type="expand")
+    df["REQUEST_COUNT"] = results[0]
+    df["REQUEST_REASON"] = results[1]
+
+    df["REQUEST_RATIO_OF_YEAR"] = df["REQUEST_COUNT"] / df["NUMBERS"]
+    df["REQUEST_RATIO_OF_YEAR_STR"] = (
+        df["REQUEST_RATIO_OF_YEAR"] * 100
+    ).round(2).astype(str) + "%"
+
+    df = df.sort_values(
+        by=["REQUEST_COUNT", "NUMBERS"],
+        ascending=False
+    )
+
+    df.to_csv(OUTPUT_CSV, index=False, encoding="utf-8-sig")
+
+    print("已輸出資料需求規劃表：", OUTPUT_CSV)
+    print("總建議索取筆數：", df["REQUEST_COUNT"].sum())
+    print(df[[
+        "UNIT_NAME",
+        "TYPE_NAME",
+        "NUMBERS",
+        "PERCENT_STR",
+        "REQUEST_COUNT",
+        "REQUEST_REASON"
+    ]].head(20))
+
+
+if __name__ == "__main__":
+    main()
