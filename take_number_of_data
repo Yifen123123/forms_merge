@@ -16,32 +16,23 @@ MIN_PER_CLASS = 20
 
 def decide_request_count(row):
     yearly_count = int(row["NUMBERS"])
-    percent = float(row["PERCENT"])
 
-    # 如果一年總量比最低門檻還少，就全拿
-    if yearly_count <= MIN_PER_CLASS:
-        return yearly_count, "低頻類別，建議全拿"
-
-    # 依照比例計算理論需求量
-    proportional_count = math.ceil(TARGET_TOTAL * percent)
-
-    # 加入最低門檻與最高上限
-    request_count = max(proportional_count, MIN_PER_CLASS)
-    request_count = min(request_count, MAX_PER_CLASS)
-
-    # 不能超過近一年實際數量
-    request_count = min(request_count, yearly_count)
-
-    if yearly_count >= 1000:
-        reason = "高頻類別，依比例取樣並設定上限"
+    if yearly_count >= 5000:
+        return 400, "超高頻類別，建議提高樣本量"
+    elif yearly_count >= 3000:
+        return 300, "高頻類別，建議保留較多樣本"
+    elif yearly_count >= 2000:
+        return 250, "高頻類別，需涵蓋足夠語意變化"
+    elif yearly_count >= 1000:
+        return 200, "中高頻類別，需保留穩定訓練量"
     elif yearly_count >= 500:
-        reason = "中高頻類別，依比例取樣"
+        return 120, "中頻類別，取得基本訓練量"
     elif yearly_count >= 100:
-        reason = "中頻類別，保留足夠訓練樣本"
+        return 60, "中低頻類別，取得基本可學習樣本"
+    elif yearly_count >= 30:
+        return 30, "低頻類別，建議盡量全拿或至少30筆"
     else:
-        reason = "低頻類別，至少取得基本訓練量"
-
-    return request_count, reason
+        return yearly_count, "極低頻類別，建議全拿"
 
 
 def main():
