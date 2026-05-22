@@ -14,7 +14,7 @@ from utils.timing_utils import TimingRecorder
 # Config
 # =========================
 
-OLLAMA_HOST = "http://10.67.75.157:11434"
+OLLAMA_HOST = ""
 LLM_MODEL_NAME = "gpt-oss:20b"
 
 EMBEDDING_MODEL_NAME = "intfloat/multilingual-e5-base"
