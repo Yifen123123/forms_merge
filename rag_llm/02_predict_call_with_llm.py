@@ -5,6 +5,10 @@ import re
 import requests
 
 
+# =========================
+# 基本設定
+# =========================
+
 OLLAMA_HOST = ""
 MODEL_NAME = "gpt-oss:20b"
 
@@ -12,7 +16,12 @@ KB_PATH = Path("processed/category_knowledge_base.json")
 
 MAX_CALL_CHARS = 6000
 TIMEOUT_SECONDS = 180
+CONFIDENCE_THRESHOLD = 0.65
 
+
+# =========================
+# I/O
+# =========================
 
 def load_json(path: Path):
     if not path.exists():
@@ -34,8 +43,13 @@ def read_text(path: Path) -> str:
     return text[:MAX_CALL_CHARS]
 
 
+# =========================
+# JSON parsing
+# =========================
+
 def clean_llm_json_text(text: str) -> str:
     text = text.strip()
+
     text = re.sub(r"^```json\s*", "", text)
     text = re.sub(r"^```\s*", "", text)
     text = re.sub(r"\s*```$", "", text)
@@ -49,40 +63,22 @@ def clean_llm_json_text(text: str) -> str:
 
 
 def extract_json(text: str) -> dict:
-    text = text.strip()
-
-    # 移除 markdown code block
-    text = re.sub(r"^```json\s*", "", text)
-    text = re.sub(r"^```\s*", "", text)
-    text = re.sub(r"\s*```$", "", text)
-
-    # 抓最外層 JSON
-    match = re.search(r"\{.*\}", text, re.DOTALL)
-
-    if not match:
-        raise ValueError(f"找不到 JSON：\n{text}")
-
-    json_text = match.group(0)
-
-    # 修正常見錯誤
-    json_text = json_text.replace("\n", " ")
-
-    # 單引號 → 雙引號
-    json_text = re.sub(r"'", '"', json_text)
-
-    # True False None 修正
-    json_text = json_text.replace("True", "true")
-    json_text = json_text.replace("False", "false")
-    json_text = json_text.replace("None", "null")
+    json_text = clean_llm_json_text(text)
 
     try:
         return json.loads(json_text)
 
-    except json.JSONDecodeError as e:
-        print("\n========== JSON PARSE FAILED ==========\n")
+    except json.JSONDecodeError:
+        print("\n========== RAW LLM OUTPUT ==========\n")
+        print(text)
+        print("\n========== JSON TEXT ==========\n")
         print(json_text)
-        raise e
+        raise
 
+
+# =========================
+# Ollama
+# =========================
 
 def call_ollama(prompt: str) -> str:
     url = f"{OLLAMA_HOST}/api/generate"
@@ -91,6 +87,7 @@ def call_ollama(prompt: str) -> str:
         "model": MODEL_NAME,
         "prompt": prompt,
         "stream": False,
+        "format": "json",
         "options": {
             "temperature": 0.1,
             "top_p": 0.9,
@@ -109,14 +106,16 @@ def call_ollama(prompt: str) -> str:
     return data["response"]
 
 
+# =========================
+# Knowledge base
+# =========================
+
 def simplify_kb_for_prompt(kb: list[dict]) -> list[dict]:
-    """
-    壓縮 knowledge base，避免 prompt 過長。
-    """
     simplified = []
 
-    for item in kb:
+    for idx, item in enumerate(kb):
         simplified.append({
+            "index": idx,
             "label_name": item.get("label_name", ""),
             "doc_type": item.get("doc_type", ""),
             "unit": item.get("unit", ""),
@@ -134,10 +133,30 @@ def simplify_kb_for_prompt(kb: list[dict]) -> list[dict]:
     return simplified
 
 
+def build_label_options(kb: list[dict]) -> list[dict]:
+    options = []
+
+    for idx, item in enumerate(kb):
+        options.append({
+            "index": idx,
+            "label_name": item.get("label_name", ""),
+            "doc_type": item.get("doc_type", ""),
+            "unit": item.get("unit", ""),
+            "category": item.get("category", "")
+        })
+
+    return options
+
+
+# =========================
+# Prompt
+# =========================
+
 def build_prompt(call_text: str, kb: list[dict]) -> str:
     kb_for_prompt = simplify_kb_for_prompt(kb)
+    label_options = build_label_options(kb)
 
-    label_names = [item["label_name"] for item in kb_for_prompt]
+    max_index = len(label_options) - 1
 
     prompt = f"""
 你是一個保險客服通話的會辦分類系統。
@@ -145,17 +164,19 @@ def build_prompt(call_text: str, kb: list[dict]) -> str:
 你的任務：
 根據「新通話內容」與「分類知識庫」，判斷這通電話最應該被分到哪一個會辦分類。
 
-重要限制：
-1. 你只能從 provided_label_names 裡面選擇一個 label_name。
-2. 不可以創造新的 label_name。
-3. 不可以輸出不存在於分類知識庫的分類。
-4. 如果信心不足，也必須選出最可能的一類，但 confidence 要降低。
-5. 如果某類 data_sufficiency = low，請不要過度自信。
-6. 請根據通話中的具體語句或需求判斷，不要只靠關鍵字。
-7. 請輸出合法 JSON，不要輸出 markdown，不要加任何解釋文字。
+非常重要的限制：
+1. 你只能輸出 provided_label_options 中存在的 pred_label_index。
+2. pred_label_index 必須是整數，範圍只能是 0 到 {max_index}。
+3. 禁止輸出 label_name 作為分類結果。
+4. 禁止自行新增、改寫、翻譯、縮寫任何分類名稱。
+5. 最後的 label_name 會由程式根據 pred_label_index 自動反查，因此你不需要輸出 pred_label_name。
+6. 如果信心不足，也必須選出最可能的一個 pred_label_index，但 confidence 要降低。
+7. 如果某類 data_sufficiency = low，請不要過度自信。
+8. 請根據通話中的具體語句、主要需求、處理方向判斷，不要只靠關鍵字。
+9. 請輸出合法 JSON，不要輸出 markdown，不要加任何解釋文字。
 
-provided_label_names:
-{json.dumps(label_names, ensure_ascii=False, indent=2)}
+provided_label_options:
+{json.dumps(label_options, ensure_ascii=False, indent=2)}
 
 分類知識庫：
 {json.dumps(kb_for_prompt, ensure_ascii=False, indent=2)}
@@ -165,19 +186,16 @@ provided_label_names:
 {call_text}
 \"\"\"
 
-請輸出以下 JSON 格式，欄位名稱不可更改：
+請只輸出以下 JSON 格式，欄位名稱不可更改：
 
 {{
-  "pred_label_name": "",
-  "pred_doc_type": "",
-  "pred_unit": "",
-  "pred_category": "",
+  "pred_label_index": 0,
   "confidence": 0.0,
   "reason": "",
   "evidence_from_call": [],
   "possible_alternatives": [
     {{
-      "label_name": "",
+      "label_index": 0,
       "reason": ""
     }}
   ],
@@ -187,40 +205,103 @@ provided_label_names:
     return prompt.strip()
 
 
+# =========================
+# Validation
+# =========================
+
 def validate_prediction(result: dict, kb: list[dict]) -> dict:
     label_map = {
-        item.get("label_name"): item
-        for item in kb
+        idx: item
+        for idx, item in enumerate(kb)
     }
 
-    pred_label = result.get("pred_label_name", "")
+    pred_index = result.get("pred_label_index")
 
-    if pred_label not in label_map:
+    try:
+        pred_index = int(pred_index)
+    except Exception:
+        result["pred_label_index"] = None
+        result["pred_label_name"] = ""
+        result["pred_doc_type"] = ""
+        result["pred_unit"] = ""
+        result["pred_category"] = ""
+        result["confidence"] = 0.0
         result["need_human_review"] = True
-        result["validation_warning"] = "LLM 輸出了不存在於 category_knowledge_base.json 的 label_name。"
+        result["validation_warning"] = "LLM 沒有輸出合法的 pred_label_index。"
         return result
 
-    matched = label_map[pred_label]
+    if pred_index not in label_map:
+        result["pred_label_index"] = pred_index
+        result["pred_label_name"] = ""
+        result["pred_doc_type"] = ""
+        result["pred_unit"] = ""
+        result["pred_category"] = ""
+        result["confidence"] = 0.0
+        result["need_human_review"] = True
+        result["validation_warning"] = "LLM 輸出的 pred_label_index 不在候選範圍內。"
+        return result
 
+    matched = label_map[pred_index]
+
+    result["pred_label_index"] = pred_index
+    result["pred_label_name"] = matched.get("label_name", "")
     result["pred_doc_type"] = matched.get("doc_type", "")
     result["pred_unit"] = matched.get("unit", "")
     result["pred_category"] = matched.get("category", "")
 
-    confidence = result.get("confidence", 0.0)
-
     try:
-        confidence = float(confidence)
+        confidence = float(result.get("confidence", 0.0))
     except Exception:
         confidence = 0.0
 
     confidence = max(0.0, min(1.0, confidence))
     result["confidence"] = confidence
 
-    if confidence < 0.65:
+    if "need_human_review" not in result:
+        result["need_human_review"] = False
+
+    if confidence < CONFIDENCE_THRESHOLD:
         result["need_human_review"] = True
+
+    # 整理 possible_alternatives
+    alternatives = result.get("possible_alternatives", [])
+
+    cleaned_alternatives = []
+
+    if isinstance(alternatives, list):
+        for alt in alternatives:
+            if not isinstance(alt, dict):
+                continue
+
+            alt_index = alt.get("label_index")
+
+            try:
+                alt_index = int(alt_index)
+            except Exception:
+                continue
+
+            if alt_index not in label_map:
+                continue
+
+            alt_item = label_map[alt_index]
+
+            cleaned_alternatives.append({
+                "label_index": alt_index,
+                "label_name": alt_item.get("label_name", ""),
+                "doc_type": alt_item.get("doc_type", ""),
+                "unit": alt_item.get("unit", ""),
+                "category": alt_item.get("category", ""),
+                "reason": alt.get("reason", "")
+            })
+
+    result["possible_alternatives"] = cleaned_alternatives
 
     return result
 
+
+# =========================
+# CLI
+# =========================
 
 def parse_args():
     parser = argparse.ArgumentParser(
@@ -242,14 +323,21 @@ def parse_args():
     return parser.parse_args()
 
 
+# =========================
+# Main
+# =========================
+
 def main():
     args = parse_args()
 
     input_path = Path(args.input)
 
     kb = load_json(KB_PATH)
-    call_text = read_text(input_path)
 
+    if not isinstance(kb, list):
+        raise ValueError("category_knowledge_base.json 應該是一個 list。")
+
+    call_text = read_text(input_path)
     prompt = build_prompt(call_text, kb)
 
     print(f"分類知識庫類別數：{len(kb)}")
@@ -261,11 +349,7 @@ def main():
 
     print("Ollama 回傳完成，開始解析 JSON...")
 
-    print("\n========== RAW LLM OUTPUT ==========\n")
-    print(raw_output)
-
     result = extract_json(raw_output)
-    
     result = validate_prediction(result, kb)
 
     result["input_file"] = str(input_path)
