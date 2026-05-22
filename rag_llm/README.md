@@ -980,34 +980,601 @@ FAISS search
 Top-K category candidates
 ```
 
+# 05_predict_call_with_category_rag.py
+
+# 功能
+
+此程式是目前專案的核心分類流程。
+
+它會將：
+
+```text
+Embedding Retrieval
++
+LLM Reasoning
+```
+
+整合成：
+
+```text
+RAG-style Category Classification System
+```
+
 ---
 
-# 下一步建議
+# 設計理念
+
+本專案目前不再使用：
+
+```text
+純 cosine similarity 分類
+```
+
+也不完全依靠：
+
+```text
+LLM 直接閱讀全部 knowledge base
+```
+
+而是改成：
+
+```text
+Retrieval
+↓
+Candidate Narrowing
+↓
+LLM Final Reasoning
+```
+
+也就是：
+
+```text
+粗粒度檢索
++
+細粒度推理
+```
+
+---
+
+# 為什麼需要 RAG？
+
+原本 `02_predict_call_with_llm_two_stage.py`：
+
+雖然已經將：
+
+```text
+64 類
+```
+
+縮減成：
+
+```text
+unit → category
+```
+
+但仍然存在：
+
+```text
+1. prompt 過長
+2. LLM hallucination
+3. latency 較高
+4. category 數量增加後 scaling 不佳
+```
+
+因此加入：
+
+```text
+Embedding + FAISS Retrieval
+```
+
+先縮小候選範圍。
+
+---
+
+# 系統流程
+
+```text
+new_call.txt
+        ↓
+E5 Embedding
+        ↓
+FAISS Search
+        ↓
+Top-K Candidate Categories
+        ↓
+LLM Final Classification
+        ↓
+Final Prediction
+```
+
+---
+
+# Stage 0：Embedding Retrieval
+
+## Retrieval 目標
+
+此階段不是直接分類。
+
+而是：
+
+```text
+從分類知識庫中找出最相關的 Top-K 候選分類
+```
+
+因此：
+
+```text
+Embedding 的角色是：
+Candidate Generation
+```
+
+而不是：
+
+```text
+Final Decision
+```
+
+---
+
+# 為什麼 embedding 的是 category knowledge？
+
+目前 retrieval 並不是：
+
+```text
+new call
+→ 找最像的歷史通話
+```
+
+而是：
+
+```text
+new call
+→ 找最相關的分類規則
+```
+
+因此 embedding 的資料是：
+
+```text
+category_knowledge_base.json
+```
+
+中的：
+
+```text
+1. definition
+2. decision_rules
+3. negative_rules
+4. customer intents
+5. required evidence
+```
+
+這種：
+
+```text
+category-level semantic knowledge
+```
+
+會比：
+
+```text
+直接 embedding 少量歷史通話
+```
+
+更穩定。
+
+---
+
+# Retrieval 流程
+
+## Offline
+
+```text
+category_knowledge_base.json
+        ↓
+category rule text
+        ↓
+E5 embedding
+        ↓
+FAISS index
+```
+
+---
+
+## Online
+
+```text
+new_call.txt
+        ↓
+query embedding
+        ↓
+FAISS search
+        ↓
+Top-K candidate categories
+```
+
+---
+
+# Retrieval Candidate 格式
+
+FAISS 會回傳：
+
+```json
+{
+  "candidate_index": 0,
+  "rank": 1,
+  "retrieval_score": 0.82,
+  "label_name": "",
+  "doc_type": "",
+  "unit": "",
+  "category": "",
+  "definition": "",
+  "num_examples": 1,
+  "data_sufficiency": "low"
+}
+```
+
+---
+
+# Stage 1：LLM Final Classification
+
+LLM 不再閱讀：
+
+```text
+全部 64 類
+```
+
+而是只閱讀：
+
+```text
+Top-K retrieval candidates
+```
+
+例如：
+
+```text
+Top-5 categories
+```
+
+因此：
+
+```text
+Prompt 長度大幅下降
+```
+
+並且：
+
+```text
+LLM hallucination 風險下降
+```
+
+---
+
+# LLM 的角色
+
+在此架構中：
+
+## Embedding 負責
+
+```text
+語意初步檢索
+```
+
+## LLM 負責
+
+```text
+最終 reasoning 與分類判斷
+```
+
+因此：
+
+```text
+Embedding = coarse retrieval
+LLM = fine reasoning
+```
+
+---
+
+# 為什麼 retrieval_score 不能直接決定分類？
+
+因為：
+
+```text
+高 retrieval score
+≠
+一定是正確分類
+```
+
+有些分類：
+
+```text
+語意很接近
+```
+
+但：
+
+```text
+業務流程不同
+```
+
+因此：
+
+```text
+retrieval_score 只能作為候選排序
+```
+
+真正 final classification：
+
+```text
+仍然需要 LLM reasoning
+```
+
+---
+
+# Prompt 設計
+
+Prompt 中會要求 LLM：
+
+```text
+1. 只能從 Top-K candidates 中選擇
+2. 不可自行新增 label_name
+3. 不可只依賴 retrieval_score
+4. 必須根據通話內容與分類規則判斷
+```
+
+並且：
+
+```text
+LLM 只輸出 candidate_index
+```
+
+最後由程式反查正式分類。
+
+---
+
+# 為什麼使用 candidate_index？
+
+避免：
+
+```text
+LLM 改字
+LLM 縮寫
+LLM 翻譯
+LLM hallucination
+```
+
+例如：
+
+```text
+保全部_契約變更
+```
+
+可能被模型輸出成：
+
+```text
+契約變更
+保全_契約變更
+保全部-契約變更
+```
+
+因此：
+
+```text
+LLM 只負責選 index
+程式負責反查正式 label
+```
+
+---
+
+# retry 機制
+
+若：
+
+```text
+LLM 沒有輸出合法 JSON
+```
+
+系統會：
+
+```text
+自動 retry 一次
+```
+
+重新要求：
+
+```text
+只輸出 JSON
+```
+
+---
+
+# timing 統計
+
+此程式會記錄：
+
+```text
+1. embedding model loading
+2. FAISS loading
+3. category retrieval
+4. prompt building
+5. LLM inference
+6. validation
+7. total script time
+```
+
+輸出：
+
+```json
+{
+  "timing": {
+    "category_retrieval_seconds": 0.08,
+    "rag_llm_seconds": 4.2,
+    "total_script_seconds": 5.1
+  }
+}
+```
+
+---
+
+# 執行方式
+
+```bash
+python 05_predict_call_with_category_rag.py \
+  --input new_calls/new_call.txt \
+  --top-k 5
+```
+
+---
+
+# 輸出 JSON
+
+```bash
+python 05_predict_call_with_category_rag.py \
+  --input new_calls/new_call.txt \
+  --top-k 5 \
+  --output processed/predictions/rag_result.json
+```
+
+---
+
+# 與 02_ 的差異
+
+## 02_
+
+```text
+LLM directly reads knowledge base
+```
+
+---
+
+## 05_
+
+```text
+Embedding Retrieval
+↓
+Top-K Candidate Narrowing
+↓
+LLM Final Reasoning
+```
+
+因此：
+
+```text
+05_ 更接近真正 production RAG pipeline
+```
+
+---
+
+# 目前整體系統架構
+
+```text
+calls/
+        +
+classifier_dataset.json
+        ↓
+
+01_build_category_knowledge_base.py
+        ↓
+category_knowledge_base.json
+
+==================================================
+
+03_build_category_faiss_index.py
+        ↓
+category embeddings
+        ↓
+FAISS index
+
+==================================================
+
+05_predict_call_with_category_rag.py
+
+new_call.txt
+        ↓
+query embedding
+        ↓
+FAISS retrieval
+        ↓
+Top-K candidate categories
+        ↓
+LLM reasoning
+        ↓
+final category prediction
+```
+
+---
+
+# 下一步可能方向
+
+## 1. Retrieval + reranking
 
 目前：
 
 ```text
-02_ 與 04_ 還是分開的
+FAISS retrieval
+→ LLM classification
 ```
 
-下一步可以整合成：
+之後可加入：
 
 ```text
-05_predict_call_with_category_rag.py
+Cross Encoder Reranking
 ```
 
-流程：
+---
+
+## 2. Multi-stage routing
+
+目前：
 
 ```text
-new_call.txt
-→ embedding
-→ FAISS retrieve Top-K categories
-→ LLM final classification
-→ output
+Top-K category retrieval
 ```
 
-這會真正變成：
+之後可增加：
 
 ```text
-RAG-style category classification system
+unit retrieval
+→ category retrieval
+→ final classification
+```
+
+---
+
+## 3. Historical Call Retrieval
+
+目前 retrieval 的是：
+
+```text
+category knowledge
+```
+
+之後也可加入：
+
+```text
+最相近歷史通話案例
+```
+
+作為 additional evidence。
+
+---
+
+# 目前專案定位
+
+目前專案已經包含：
+
+```text
+1. LLM-generated category knowledge base
+2. Two-stage LLM classification
+3. Embedding-based category retrieval
+4. RAG-style category classification pipeline
+```
+
+其中：
+
+```text
+01_：建立分類知識庫
+02_：兩階段 LLM 分類
+03_：建立 category FAISS index
+04_：測試 retrieval
+05_：Retrieval + LLM 的 RAG 分類流程
 ```
