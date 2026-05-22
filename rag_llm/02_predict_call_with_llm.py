@@ -1,15 +1,13 @@
 from pathlib import Path
 import argparse
 import json
-import re
 import requests
+import time
+
+from utils.timing_utils import TimingRecorder
 
 
-# ============================================================
-# Basic Config
-# ============================================================
-
-OLLAMA_HOST = ""
+OLLAMA_HOST = "http://10.67.75.157:11434"
 MODEL_NAME = "gpt-oss:20b"
 
 KB_PATH = Path("processed/category_knowledge_base.json")
@@ -18,10 +16,6 @@ MAX_CALL_CHARS = 6000
 TIMEOUT_SECONDS = 180
 CONFIDENCE_THRESHOLD = 0.65
 
-
-# ============================================================
-# I/O
-# ============================================================
 
 def load_json(path: Path):
     if not path.exists():
@@ -49,10 +43,6 @@ def save_json(data, path: Path):
     with path.open("w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
 
-
-# ============================================================
-# Ollama
-# ============================================================
 
 def call_ollama(prompt: str) -> str:
     url = f"{OLLAMA_HOST}/api/generate"
@@ -105,9 +95,6 @@ def extract_json(text: str) -> dict:
 
 
 def call_llm_json(prompt: str, retry_prompt_hint: str = "") -> dict:
-    """
-    第一次如果不是合法 JSON，就自動 retry 一次。
-    """
     raw_output = call_ollama(prompt)
 
     try:
@@ -142,10 +129,6 @@ def call_llm_json(prompt: str, retry_prompt_hint: str = "") -> dict:
 
         return extract_json(raw_output_2)
 
-
-# ============================================================
-# Stage 1: Unit Classification
-# ============================================================
 
 def build_unit_options(kb: list[dict]) -> list[dict]:
     units = sorted(
@@ -246,10 +229,6 @@ def validate_unit_prediction(result: dict, unit_options: list[dict]) -> dict:
         "unit_need_human_review": bool(result.get("need_human_review", False)) or confidence < CONFIDENCE_THRESHOLD
     }
 
-
-# ============================================================
-# Stage 2: Category Classification within Unit
-# ============================================================
 
 def filter_kb_by_unit(kb: list[dict], unit: str) -> list[dict]:
     return [
@@ -410,10 +389,6 @@ def validate_category_prediction(result: dict, candidate_kb: list[dict]) -> dict
     }
 
 
-# ============================================================
-# CLI
-# ============================================================
-
 def parse_args():
     parser = argparse.ArgumentParser(
         description="Two-stage LLM classifier for meeting-form category."
@@ -434,86 +409,93 @@ def parse_args():
     return parser.parse_args()
 
 
-# ============================================================
-# Main
-# ============================================================
-
 def main():
+    timer = TimingRecorder()
+    total_start = time.perf_counter()
+
     args = parse_args()
     input_path = Path(args.input)
 
-    kb = load_json(KB_PATH)
+    with timer.measure("load_kb_seconds"):
+        kb = load_json(KB_PATH)
 
     if not isinstance(kb, list):
         raise ValueError("category_knowledge_base.json 應該是一個 list")
 
-    call_text = read_text(input_path)
-
-    # -------------------------
-    # Stage 1
-    # -------------------------
+    with timer.measure("read_input_seconds"):
+        call_text = read_text(input_path)
 
     print("=" * 80)
     print("Stage 1：判斷會辦單位")
 
-    unit_options = build_unit_options(kb)
-    unit_prompt = build_unit_prompt(call_text, unit_options)
+    with timer.measure("stage1_build_unit_options_seconds"):
+        unit_options = build_unit_options(kb)
+
+    with timer.measure("stage1_prompt_build_seconds"):
+        unit_prompt = build_unit_prompt(call_text, unit_options)
 
     print(f"單位數量：{len(unit_options)}")
     print(f"Stage 1 prompt 長度：{len(unit_prompt)} 字")
     print("開始呼叫 Ollama...")
 
-    unit_result = call_llm_json(
-        unit_prompt,
-        retry_prompt_hint='請輸出：{"pred_unit_index": 0, "confidence": 0.0, "reason": "", "evidence_from_call": [], "need_human_review": false}'
-    )
+    with timer.measure("stage1_llm_seconds"):
+        unit_result = call_llm_json(
+            unit_prompt,
+            retry_prompt_hint='請輸出：{"pred_unit_index": 0, "confidence": 0.0, "reason": "", "evidence_from_call": [], "need_human_review": false}'
+        )
 
-    unit_prediction = validate_unit_prediction(unit_result, unit_options)
+    with timer.measure("stage1_validation_seconds"):
+        unit_prediction = validate_unit_prediction(unit_result, unit_options)
 
     pred_unit = unit_prediction["pred_unit"]
 
     print(f"預測單位：{pred_unit}")
     print(f"單位信心：{unit_prediction['unit_confidence']}")
 
-    # -------------------------
-    # Stage 2
-    # -------------------------
-
     print("=" * 80)
     print("Stage 2：判斷該單位底下的會辦類別")
 
-    candidate_kb = filter_kb_by_unit(kb, pred_unit)
+    with timer.measure("stage2_candidate_filter_seconds"):
+        candidate_kb = filter_kb_by_unit(kb, pred_unit)
 
     if not candidate_kb:
         raise ValueError(f"找不到 unit={pred_unit} 底下的候選類別")
 
-    category_prompt = build_category_prompt(
-        call_text=call_text,
-        pred_unit=pred_unit,
-        candidate_kb=candidate_kb
-    )
+    with timer.measure("stage2_prompt_build_seconds"):
+        category_prompt = build_category_prompt(
+            call_text=call_text,
+            pred_unit=pred_unit,
+            candidate_kb=candidate_kb
+        )
 
     print(f"候選類別數：{len(candidate_kb)}")
     print(f"Stage 2 prompt 長度：{len(category_prompt)} 字")
     print("開始呼叫 Ollama...")
 
-    category_result = call_llm_json(
-        category_prompt,
-        retry_prompt_hint='請輸出：{"pred_label_index": 0, "confidence": 0.0, "reason": "", "evidence_from_call": [], "possible_alternatives": [], "need_human_review": false}'
-    )
+    with timer.measure("stage2_llm_seconds"):
+        category_result = call_llm_json(
+            category_prompt,
+            retry_prompt_hint='請輸出：{"pred_label_index": 0, "confidence": 0.0, "reason": "", "evidence_from_call": [], "possible_alternatives": [], "need_human_review": false}'
+        )
 
-    category_prediction = validate_category_prediction(category_result, candidate_kb)
-
-    # -------------------------
-    # Final
-    # -------------------------
+    with timer.measure("stage2_validation_seconds"):
+        category_prediction = validate_category_prediction(
+            category_result,
+            candidate_kb
+        )
 
     final_confidence = min(
         unit_prediction["unit_confidence"],
         category_prediction["category_confidence"]
     )
 
+    timer.add(
+        "total_script_seconds",
+        time.perf_counter() - total_start
+    )
+
     final_result = {
+        "timing": timer.get_timings(),
         "input_file": str(input_path),
         "method": "two_stage_llm_classification_with_retry",
         "stage_1_unit_prediction": unit_prediction,
@@ -538,7 +520,7 @@ def main():
     if args.output:
         output_path = Path(args.output)
         save_json(final_result, output_path)
-        print(f"\n結果已儲存至：output_path}")
+        print(f"\n結果已儲存至：{output_path}")
 
 
 if __name__ == "__main__":
