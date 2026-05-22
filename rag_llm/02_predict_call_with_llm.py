@@ -7,7 +7,7 @@ import time
 from utils.timing_utils import TimingRecorder
 
 
-OLLAMA_HOST = "http://10.67.75.157:11434"
+OLLAMA_HOST = ""
 MODEL_NAME = "gpt-oss:20b"
 
 KB_PATH = Path("processed/category_knowledge_base.json")
