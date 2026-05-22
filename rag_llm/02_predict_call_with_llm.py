@@ -49,7 +49,39 @@ def clean_llm_json_text(text: str) -> str:
 
 
 def extract_json(text: str) -> dict:
-    return json.loads(clean_llm_json_text(text))
+    text = text.strip()
+
+    # 移除 markdown code block
+    text = re.sub(r"^```json\s*", "", text)
+    text = re.sub(r"^```\s*", "", text)
+    text = re.sub(r"\s*```$", "", text)
+
+    # 抓最外層 JSON
+    match = re.search(r"\{.*\}", text, re.DOTALL)
+
+    if not match:
+        raise ValueError(f"找不到 JSON：\n{text}")
+
+    json_text = match.group(0)
+
+    # 修正常見錯誤
+    json_text = json_text.replace("\n", " ")
+
+    # 單引號 → 雙引號
+    json_text = re.sub(r"'", '"', json_text)
+
+    # True False None 修正
+    json_text = json_text.replace("True", "true")
+    json_text = json_text.replace("False", "false")
+    json_text = json_text.replace("None", "null")
+
+    try:
+        return json.loads(json_text)
+
+    except json.JSONDecodeError as e:
+        print("\n========== JSON PARSE FAILED ==========\n")
+        print(json_text)
+        raise e
 
 
 def call_ollama(prompt: str) -> str:
@@ -229,7 +261,11 @@ def main():
 
     print("Ollama 回傳完成，開始解析 JSON...")
 
+    print("\n========== RAW LLM OUTPUT ==========\n")
+    print(raw_output)
+
     result = extract_json(raw_output)
+    
     result = validate_prediction(result, kb)
 
     result["input_file"] = str(input_path)
