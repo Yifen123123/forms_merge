@@ -78,6 +78,7 @@ def merge_data_folders(
         shutil.rmtree(output_dir)
 
     copied_count = 0
+    used_rules = set()
 
     for txt_file in input_dir.rglob("*.txt"):
         relative_parts = txt_file.relative_to(input_dir).parts
@@ -88,12 +89,13 @@ def merge_data_folders(
 
         doc_type, old_unit, old_category, filename = relative_parts
 
-        new_unit, new_category = get_merged_label(
-            doc_type,
-            old_unit,
-            old_category,
-            merge_rules
-        )
+        rule_key = (doc_type, old_unit, old_category)
+
+        if rule_key in merge_rules:
+            new_unit, new_category = merge_rules[rule_key]
+            used_rules.add(rule_key)
+        else:
+            new_unit, new_category = old_unit, old_category
 
         target_path = (
             output_dir
@@ -105,17 +107,30 @@ def merge_data_folders(
 
         target_path.parent.mkdir(parents=True, exist_ok=True)
 
+        # 關鍵：絕對不能覆蓋既有檔案
         if target_path.exists():
             raise FileExistsError(
-                f"檔名重複，無法合併：{target_path}"
+                f"合併後發現檔名衝突，為避免覆蓋已停止：\n"
+                f"來源檔案：{txt_file}\n"
+                f"目標檔案：{target_path}"
             )
 
         shutil.copy2(txt_file, target_path)
         copied_count += 1
 
+    unused_rules = set(merge_rules.keys()) - used_rules
+
     print(f"資料夾合併完成，共複製 {copied_count} 份 txt 檔案")
     print(f"輸出資料夾：{output_dir}")
 
+    if unused_rules:
+        print("\n以下合併規則這次沒有套用到，但不影響程式執行：")
+        for doc_type, old_unit, old_category in sorted(unused_rules):
+            new_unit, new_category = merge_rules[(doc_type, old_unit, old_category)]
+            print(
+                f"- {doc_type} / {old_unit} / {old_category} "
+                f"→ {new_unit} / {new_category}"
+            )
 
 def build_classifier_dataset(data_dir: Path) -> list[dict]:
     records = []
