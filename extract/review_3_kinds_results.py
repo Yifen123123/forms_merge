@@ -1,4 +1,5 @@
 import math
+import html
 from pathlib import Path
 
 import pandas as pd
@@ -18,10 +19,142 @@ MODEL_RESULT_FILES = {
     "Qwen2.5 14B": "results_qwen2.5_14b/extracted_calls.csv",
 }
 
+MODEL_COLORS = {
+    "原會辦單": {
+        "bg": "#F8FAFC",
+        "border": "#64748B",
+        "title": "#334155",
+    },
+    "GPT-OSS 20B": {
+        "bg": "#EFF6FF",
+        "border": "#3B82F6",
+        "title": "#1D4ED8",
+    },
+    "Qwen3 8B": {
+        "bg": "#ECFDF5",
+        "border": "#10B981",
+        "title": "#047857",
+    },
+    "Qwen2.5 14B": {
+        "bg": "#FFF7ED",
+        "border": "#F97316",
+        "title": "#C2410C",
+    },
+}
+
 
 st.set_page_config(
     page_title="多模型會辦單擷取比對",
     layout="wide"
+)
+
+
+# =========================
+# CSS
+# =========================
+
+st.markdown(
+    """
+    <style>
+    .block-container {
+        padding-top: 1.5rem;
+        padding-bottom: 2rem;
+        max-width: 1500px;
+    }
+
+    .main-title {
+        font-size: 30px;
+        font-weight: 800;
+        color: #111827;
+        margin-bottom: 4px;
+    }
+
+    .sub-title {
+        font-size: 14px;
+        color: #6B7280;
+        margin-bottom: 20px;
+    }
+
+    .record-card {
+        background-color: #FFFFFF;
+        border: 1px solid #E5E7EB;
+        border-radius: 14px;
+        padding: 20px 22px;
+        margin-bottom: 28px;
+        box-shadow: 0 2px 8px rgba(0, 0, 0, 0.04);
+    }
+
+    .call-id {
+        font-size: 20px;
+        font-weight: 800;
+        color: #111827;
+        margin-bottom: 16px;
+    }
+
+    .compare-grid {
+        display: grid;
+        grid-template-columns: 1.25fr 1fr 1fr 1fr;
+        gap: 14px;
+        align-items: stretch;
+    }
+
+    .compare-box {
+        border-left: 7px solid;
+        border-radius: 12px;
+        padding: 16px 16px;
+        min-height: 260px;
+        box-sizing: border-box;
+        overflow-wrap: break-word;
+        word-break: break-word;
+    }
+
+    .box-title {
+        font-size: 17px;
+        font-weight: 800;
+        margin-bottom: 14px;
+    }
+
+    .field-title {
+        font-size: 14px;
+        font-weight: 800;
+        color: #374151;
+        margin-top: 12px;
+        margin-bottom: 6px;
+    }
+
+    .field-content {
+        font-size: 14px;
+        line-height: 1.75;
+        color: #111827;
+        white-space: pre-wrap;
+    }
+
+    .original-content {
+        font-size: 14px;
+        line-height: 1.75;
+        color: #111827;
+        white-space: pre-wrap;
+    }
+
+    .missing-text {
+        color: #9CA3AF;
+        font-style: italic;
+    }
+
+    @media (max-width: 1200px) {
+        .compare-grid {
+            grid-template-columns: 1fr 1fr;
+        }
+    }
+
+    @media (max-width: 760px) {
+        .compare-grid {
+            grid-template-columns: 1fr;
+        }
+    }
+    </style>
+    """,
+    unsafe_allow_html=True
 )
 
 
@@ -32,7 +165,11 @@ st.set_page_config(
 def clean_value(value) -> str:
     if pd.isna(value):
         return ""
-    return str(value)
+    return str(value).strip()
+
+
+def escape_text(value) -> str:
+    return html.escape(clean_value(value))
 
 
 def load_original_form(call_id: str) -> str:
@@ -56,20 +193,21 @@ def load_model_results() -> dict[str, pd.DataFrame]:
 
         df = pd.read_csv(path, dtype={"call_id": str})
 
-        required_cols = {
+        required_columns = {
             "call_id",
             "problem_description",
-            "request_content"
+            "request_content",
         }
 
-        missing_cols = required_cols - set(df.columns)
+        missing_columns = required_columns - set(df.columns)
 
-        if missing_cols:
+        if missing_columns:
             st.error(
-                f"{file_path} 缺少欄位：{missing_cols}"
+                f"{file_path} 缺少欄位：{', '.join(missing_columns)}"
             )
             continue
 
+        df["call_id"] = df["call_id"].astype(str)
         df = df.set_index("call_id")
 
         model_dfs[model_name] = df
@@ -83,72 +221,107 @@ def get_all_call_ids(model_dfs: dict[str, pd.DataFrame]) -> list[str]:
     for df in model_dfs.values():
         call_ids.update(df.index.astype(str).tolist())
 
+    form_ids = [
+        path.stem
+        for path in Path(FORMS_DIR).glob("*.txt")
+    ]
+
+    call_ids.update(form_ids)
+
     return sorted(call_ids)
 
 
-def render_model_result(model_name: str, row_data):
-    st.markdown(f"### {model_name}")
+def render_original_box(original_form: str) -> str:
+    color = MODEL_COLORS["原會辦單"]
+
+    content = escape_text(original_form)
+
+    return f"""
+    <div class="compare-box"
+         style="
+            background-color:{color['bg']};
+            border-left-color:{color['border']};
+         ">
+        <div class="box-title" style="color:{color['title']};">
+            原會辦單
+        </div>
+        <div class="original-content">{content}</div>
+    </div>
+    """
+
+
+def render_model_box(model_name: str, row_data) -> str:
+    color = MODEL_COLORS[model_name]
 
     if row_data is None:
-        st.warning("此模型沒有這筆資料")
-        return
-
-    problem_description = clean_value(
-        row_data.get("problem_description", "")
-    )
-
-    request_content = clean_value(
-        row_data.get("request_content", "")
-    )
-
-    status = clean_value(
-        row_data.get("status", "")
-    )
-
-    if status == "success":
-        st.success("status：success")
-    elif status:
-        st.warning(f"status：{status}")
+        problem_description = '<span class="missing-text">此模型沒有這筆資料</span>'
+        request_content = '<span class="missing-text">此模型沒有這筆資料</span>'
     else:
-        st.info("status：unknown")
+        problem_description_text = escape_text(
+            row_data.get("problem_description", "")
+        )
 
-    st.markdown("**問題描述**")
-    st.info(
-        problem_description
-        if problem_description
-        else "無"
-    )
+        request_content_text = escape_text(
+            row_data.get("request_content", "")
+        )
 
-    st.markdown("**需求內容**")
-    st.info(
-        request_content
-        if request_content
-        else "無"
-    )
+        problem_description = (
+            problem_description_text
+            if problem_description_text
+            else '<span class="missing-text">無</span>'
+        )
+
+        request_content = (
+            request_content_text
+            if request_content_text
+            else '<span class="missing-text">無</span>'
+        )
+
+    return f"""
+    <div class="compare-box"
+         style="
+            background-color:{color['bg']};
+            border-left-color:{color['border']};
+         ">
+        <div class="box-title" style="color:{color['title']};">
+            {model_name}
+        </div>
+
+        <div class="field-title">問題描述</div>
+        <div class="field-content">{problem_description}</div>
+
+        <div class="field-title">需求內容</div>
+        <div class="field-content">{request_content}</div>
+    </div>
+    """
 
 
-def render_record(call_id: str, model_dfs: dict[str, pd.DataFrame]):
+def render_record(call_id: str, model_dfs: dict[str, pd.DataFrame]) -> None:
     original_form = load_original_form(call_id)
 
-    with st.container(border=True):
-        st.subheader(f"Call ID：{call_id}")
+    boxes = []
+    boxes.append(render_original_box(original_form))
 
-        columns = st.columns(4, gap="medium")
+    for model_name, df in model_dfs.items():
+        if call_id in df.index:
+            row_data = df.loc[call_id]
+        else:
+            row_data = None
 
-        with columns[0]:
-            st.markdown("### 原會辦單")
-            st.info(original_form)
+        boxes.append(
+            render_model_box(model_name, row_data)
+        )
 
-        for col, (model_name, df) in zip(
-            columns[1:],
-            model_dfs.items()
-        ):
-            with col:
-                if call_id in df.index:
-                    row_data = df.loc[call_id]
-                    render_model_result(model_name, row_data)
-                else:
-                    render_model_result(model_name, None)
+    html_block = f"""
+    <div class="record-card">
+        <div class="call-id">Call ID：{html.escape(call_id)}</div>
+        <div class="compare-grid">
+            {''.join(boxes)}
+        </div>
+    </div>
+    """
+
+    st.markdown(html_block, unsafe_allow_html=True)
 
 
 # =========================
@@ -156,9 +329,14 @@ def render_record(call_id: str, model_dfs: dict[str, pd.DataFrame]):
 # =========================
 
 def main():
-    st.title("多模型會辦單擷取結果比對")
-    st.caption(
-        "左側為原會辦單，右側依序顯示 GPT-OSS 20B、Qwen3 8B、Qwen2.5 14B 的擷取結果。"
+    st.markdown(
+        """
+        <div class="main-title">多模型會辦單擷取結果比對</div>
+        <div class="sub-title">
+            同時比較原會辦單、GPT-OSS 20B、Qwen3 8B、Qwen2.5 14B 的擷取結果。
+        </div>
+        """,
+        unsafe_allow_html=True
     )
 
     model_dfs = load_model_results()
