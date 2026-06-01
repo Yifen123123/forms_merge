@@ -1,41 +1,22 @@
-import requests
+from ollama import Client
 
 
-def call_ollama(
-    prompt: str,
-    model: str = "qwen2.5:14b",
-    base_url: str = "http://localhost:11434",
-    temperature: float = 0.1,
-    timeout: int = 300,
-) -> str:
-    """
-    呼叫 Ollama Server 並回傳模型輸出文字。
-    """
+class OllamaClient:
 
-    url = f"{base_url.rstrip('/')}/api/generate"
+    def __init__(
+        self,
+        host="http://localhost:11434",
+        model="qwen3:8b"
+    ):
+        self.client = Client(host=host)
+        self.model = model
 
-    payload = {
-        "model": model,
-        "prompt": prompt,
-        "stream": False,
-        "options": {
-            "temperature": temperature
-        }
-    }
+    def generate(self, prompt: str) -> str:
 
-    try:
-        response = requests.post(
-            url,
-            json=payload,
-            timeout=timeout
+        response = self.client.generate(
+            model=self.model,
+            prompt=prompt,
+            stream=False
         )
-        response.raise_for_status()
-    except requests.exceptions.RequestException as e:
-        raise RuntimeError(f"Ollama 呼叫失敗：{e}")
 
-    data = response.json()
-
-    if "response" not in data:
-        raise RuntimeError(f"Ollama 回傳格式異常：{data}")
-
-    return data["response"].strip()
+        return response["response"]
