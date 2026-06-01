@@ -1,5 +1,4 @@
 import math
-import html
 from pathlib import Path
 
 import pandas as pd
@@ -17,12 +16,6 @@ st.set_page_config(
 )
 
 
-def safe_text(value):
-    if pd.isna(value):
-        return ""
-    return html.escape(str(value))
-
-
 def load_original_form(call_id: str) -> str:
     path = Path(FORMS_DIR) / f"{call_id}.txt"
 
@@ -32,219 +25,126 @@ def load_original_form(call_id: str) -> str:
     return path.read_text(encoding="utf-8")
 
 
-def render_card(call_id, original_text, problem_description, request_content, status):
-    original_text = safe_text(original_text)
-    problem_description = safe_text(problem_description)
-    request_content = safe_text(request_content)
-    status = safe_text(status)
-
-    html_block = f"""
-    <div class="record-card">
-        <div class="left-panel">
-            <div class="panel-title">原會辦單內容｜ORIGINAL MEMO</div>
-            <div class="call-badge">{call_id}</div>
-
-            <div class="memo-box">
-                <pre>{original_text}</pre>
-            </div>
-        </div>
-
-        <div class="right-panel">
-            <div class="panel-title">LLM 擷取結果｜AI EXTRACTION</div>
-
-            <div class="confidence">
-                🤖 擷取狀態：{status}
-            </div>
-
-            <div class="field-row">
-                <div class="field-label">問題描述</div>
-                <div class="ai-box">{problem_description}</div>
-            </div>
-
-            <div class="field-row">
-                <div class="field-label">需求內容</div>
-                <div class="ai-box">{request_content}</div>
-            </div>
-        </div>
-    </div>
+def split_form_text(text: str) -> tuple[str, str]:
+    """
+    如果原會辦單本身有「問題描述」「需求內容」標題，
+    可以簡單切出來。
+    如果切不出來，就全部放在問題描述區。
     """
 
-    st.markdown(html_block, unsafe_allow_html=True)
+    problem = text
+    request = ""
+
+    if "【需求內容】" in text:
+        parts = text.split("【需求內容】", 1)
+        problem = parts[0].replace("【問題描述】", "").strip()
+        request = parts[1].strip()
+
+    elif "需求內容：" in text:
+        parts = text.split("需求內容：", 1)
+        problem = parts[0].replace("問題描述：", "").strip()
+        request = parts[1].strip()
+
+    return problem.strip(), request.strip()
 
 
-st.markdown(
-    """
-    <style>
-    .main {
-        background-color: #f5f7fa;
-    }
+def render_text_block(title: str, content: str):
+    st.markdown(f"**{title}**")
+    st.info(content if content else "無")
 
-    .block-container {
-        padding-top: 1.5rem;
-        padding-bottom: 2rem;
-        max-width: 1400px;
-    }
 
-    .page-title {
-        font-size: 28px;
-        font-weight: 800;
-        margin-bottom: 6px;
-        color: #1f2937;
-    }
+def render_record(row):
+    call_id = str(row["call_id"])
+    original_text = load_original_form(call_id)
 
-    .page-subtitle {
-        font-size: 14px;
-        color: #6b7280;
-        margin-bottom: 24px;
-    }
+    original_problem, original_request = split_form_text(original_text)
 
-    .record-card {
-        display: grid;
-        grid-template-columns: 1fr 1fr;
-        border: 1px solid #d1d5db;
-        background-color: white;
-        margin-bottom: 0px;
-        min-height: 245px;
-    }
+    status = row.get("status", "")
 
-    .left-panel,
-    .right-panel {
-        padding: 20px 24px;
-    }
+    with st.container(border=True):
+        header_left, header_right = st.columns([4, 1])
 
-    .left-panel {
-        border-right: 1px solid #d1d5db;
-        background-color: #f9fafb;
-    }
+        with header_left:
+            st.subheader(f"Call ID：{call_id}")
 
-    .right-panel {
-        background-color: #f8fbfb;
-    }
+        with header_right:
+            if status == "success":
+                st.success("success")
+            elif status:
+                st.warning(status)
+            else:
+                st.info("unknown")
 
-    .panel-title {
-        font-size: 12px;
-        font-weight: 700;
-        color: #374151;
-        margin-bottom: 18px;
-        letter-spacing: 0.3px;
-    }
+        col1, col2 = st.columns(2, gap="large")
 
-    .call-badge {
-        display: inline-block;
-        background-color: #1f2937;
-        color: white;
-        font-size: 12px;
-        font-weight: 700;
-        padding: 5px 10px;
-        border-radius: 2px;
-        margin-bottom: 12px;
-    }
+        with col1:
+            st.markdown("### 原會辦單")
 
-    .memo-box {
-        background: white;
-        border: 1px solid #e5e7eb;
-        border-radius: 2px;
-        padding: 12px 14px;
-        font-size: 14px;
-        line-height: 1.7;
-        color: #111827;
-        min-height: 130px;
-    }
+            render_text_block(
+                "問題描述",
+                original_problem
+            )
 
-    .memo-box pre {
-        white-space: pre-wrap;
-        word-break: break-word;
-        margin: 0;
-        font-family: inherit;
-    }
+            render_text_block(
+                "需求內容",
+                original_request
+            )
 
-    .confidence {
-        color: #047857;
-        font-weight: 800;
-        font-size: 14px;
-        margin-bottom: 22px;
-    }
+            with st.expander("查看原會辦單全文"):
+                st.text(original_text)
 
-    .field-row {
-        display: grid;
-        grid-template-columns: 90px 1fr;
-        align-items: start;
-        margin-bottom: 14px;
-    }
+        with col2:
+            st.markdown("### LLM 擷取結果")
 
-    .field-label {
-        font-size: 13px;
-        color: #374151;
-        padding-top: 7px;
-    }
+            render_text_block(
+                "問題描述",
+                row.get("problem_description", "")
+            )
 
-    .ai-box {
-        background-color: #dff7f4;
-        border: 1px solid #99d8d0;
-        color: #111827;
-        padding: 8px 12px;
-        border-radius: 2px;
-        font-size: 14px;
-        line-height: 1.6;
-        min-height: 38px;
-    }
+            render_text_block(
+                "需求內容",
+                row.get("request_content", "")
+            )
 
-    .pagination-info {
-        font-size: 13px;
-        color: #4b5563;
-        margin-top: 14px;
-    }
-    </style>
-    """,
-    unsafe_allow_html=True
+
+df = pd.read_csv(
+    CSV_FILE,
+    dtype={"call_id": str}
 )
-
-
-df = pd.read_csv(CSV_FILE, dtype={"call_id": str})
 
 total_records = len(df)
 total_pages = math.ceil(total_records / PAGE_SIZE)
 
-st.markdown(
-    """
-    <div class="page-title">會辦單擷取結果比對</div>
-    <div class="page-subtitle">一次顯示 5 筆，左側為原會辦單，右側為 LLM 擷取結果。</div>
-    """,
-    unsafe_allow_html=True
-)
+st.title("會辦單擷取結果比對")
+st.caption("左側為原會辦單，右側為 LLM 擷取結果。每頁顯示 5 筆資料。")
 
-col_page, col_jump = st.columns([1, 4])
+top_col1, top_col2, top_col3 = st.columns([1, 1, 4])
 
-with col_page:
+with top_col1:
     page = st.number_input(
-        "頁數",
+        "目前頁數",
         min_value=1,
         max_value=total_pages,
         value=1,
         step=1
     )
 
-start = (page - 1) * PAGE_SIZE
-end = start + PAGE_SIZE
-page_df = df.iloc[start:end]
-
-for _, row in page_df.iterrows():
-    call_id = str(row["call_id"])
-    original_text = load_original_form(call_id)
-
-    render_card(
-        call_id=call_id,
-        original_text=original_text,
-        problem_description=row.get("problem_description", ""),
-        request_content=row.get("request_content", ""),
-        status=row.get("status", "success")
+with top_col2:
+    st.metric(
+        "總筆數",
+        total_records
     )
 
-st.markdown(
-    f"""
-    <div class="pagination-info">
-        Showing {start + 1} - {min(end, total_records)} of {total_records} records
-    </div>
-    """,
-    unsafe_allow_html=True
+start = (page - 1) * PAGE_SIZE
+end = start + PAGE_SIZE
+
+page_df = df.iloc[start:end]
+
+st.divider()
+
+for _, row in page_df.iterrows():
+    render_record(row)
+
+st.caption(
+    f"Showing {start + 1} - {min(end, total_records)} of {total_records} records"
 )
