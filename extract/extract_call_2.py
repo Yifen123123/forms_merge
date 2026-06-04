@@ -1,7 +1,7 @@
 import json
 import csv
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from utils.ollama_client import OllamaClient
 from utils.json_validator import extract_json
@@ -79,41 +79,103 @@ def load_dialogue(path: Path) -> str:
 
 
 # =========================
-# 驗證 cases schema
+# 統一模型輸出格式
 # =========================
 
-def validate_cases_result(parsed: Any) -> bool:
+def normalize_result(parsed: Any) -> Optional[Dict[str, List[Dict[str, str]]]]:
+    """
+    將模型輸出統一轉成：
+
+    {
+        "cases": [
+            {
+                "problem_description": "...",
+                "request_content": "..."
+            }
+        ]
+    }
+
+    支援：
+    1. 新格式：
+       {
+           "cases": [...]
+       }
+
+    2. 舊格式：
+       {
+           "problem_description": "...",
+           "request_content": "..."
+       }
+    """
+
     if not isinstance(parsed, dict):
-        return False
+        return None
 
-    if "cases" not in parsed:
-        return False
+    # =====================
+    # 新格式 cases
+    # =====================
 
-    cases = parsed["cases"]
+    if "cases" in parsed and isinstance(parsed["cases"], list):
+        cases = []
 
-    if not isinstance(cases, list):
-        return False
+        for case in parsed["cases"]:
+            if not isinstance(case, dict):
+                continue
 
-    if len(cases) == 0:
-        return False
+            problem = case.get("problem_description", "")
+            request = case.get("request_content", "")
 
-    for case in cases:
-        if not isinstance(case, dict):
-            return False
+            if not isinstance(problem, str):
+                problem = ""
 
-        if "problem_description" not in case:
-            return False
+            if not isinstance(request, str):
+                request = ""
 
-        if "request_content" not in case:
-            return False
+            problem = problem.strip()
+            request = request.strip()
 
-        if not isinstance(case["problem_description"], str):
-            return False
+            if problem or request:
+                cases.append({
+                    "problem_description": problem,
+                    "request_content": request
+                })
 
-        if not isinstance(case["request_content"], str):
-            return False
+        if cases:
+            return {
+                "cases": cases
+            }
 
-    return True
+    # =====================
+    # 舊格式 fallback
+    # =====================
+
+    if (
+        "problem_description" in parsed
+        and "request_content" in parsed
+    ):
+        problem = parsed.get("problem_description", "")
+        request = parsed.get("request_content", "")
+
+        if not isinstance(problem, str):
+            problem = ""
+
+        if not isinstance(request, str):
+            request = ""
+
+        problem = problem.strip()
+        request = request.strip()
+
+        if problem or request:
+            return {
+                "cases": [
+                    {
+                        "problem_description": problem,
+                        "request_content": request
+                    }
+                ]
+            }
+
+    return None
 
 
 # =========================
@@ -143,23 +205,17 @@ def extract_one_call(
             "raw_output": raw_output
         }
 
-    if not validate_cases_result(parsed):
+    normalized = normalize_result(parsed)
+
+    if normalized is None:
         return {
             "cases": [],
             "status": "schema_error",
             "raw_output": raw_output
         }
 
-    cleaned_cases = []
-
-    for case in parsed["cases"]:
-        cleaned_cases.append({
-            "problem_description": case["problem_description"].strip(),
-            "request_content": case["request_content"].strip()
-        })
-
     return {
-        "cases": cleaned_cases,
+        "cases": normalized["cases"],
         "status": "success",
         "raw_output": raw_output
     }
@@ -193,6 +249,7 @@ def main() -> None:
     for idx, call_file in enumerate(call_files, start=1):
         call_id = call_file.stem
 
+        print("=" * 50)
         print(f"[{idx}/{total}] 處理 {call_id}")
 
         dialogue = load_dialogue(call_file)
@@ -204,14 +261,18 @@ def main() -> None:
             dialogue=dialogue
         )
 
-        cases = result["cases"]
         status = result["status"]
+        cases = result["cases"]
+
+        print(f"status: {status}")
+        print(f"case_count: {len(cases)}")
 
         json_results.append({
             "call_id": call_id,
             "status": status,
             "case_count": len(cases),
-            "cases": cases
+            "cases": cases,
+            "raw_output": result.get("raw_output", "")
         })
 
         if status == "success":
