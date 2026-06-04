@@ -35,7 +35,6 @@ def render_case(row):
     case_no = clean_value(row.get("case_no", ""))
     problem_description = clean_value(row.get("problem_description", ""))
     request_content = clean_value(row.get("request_content", ""))
-    status = clean_value(row.get("status", ""))
 
     with st.container(border=True):
         if case_no:
@@ -43,44 +42,18 @@ def render_case(row):
         else:
             st.markdown("#### 會辦單")
 
-        if status == "success":
-            st.success("success")
-        elif status:
-            st.warning(status)
-        else:
-            st.info("unknown")
-
         st.markdown("**問題描述**")
-        st.success(
-            problem_description
-            if problem_description
-            else "無"
-        )
+        st.success(problem_description if problem_description else "無")
 
         st.markdown("**需求內容**")
-        st.success(
-            request_content
-            if request_content
-            else "無"
-        )
+        st.success(request_content if request_content else "無")
 
 
 def render_call_block(call_id: str, group_df: pd.DataFrame):
     original_form = load_original_form(call_id)
 
-    statuses = group_df["status"].dropna().astype(str).unique().tolist()
-
     with st.container(border=True):
-        header_col1, header_col2 = st.columns([4, 1])
-
-        with header_col1:
-            st.subheader(f"Call ID：{call_id}")
-
-        with header_col2:
-            if all(status == "success" for status in statuses):
-                st.success(f"{len(group_df)} 筆")
-            else:
-                st.warning(" / ".join(statuses) if statuses else "unknown")
+        st.subheader(f"Call ID：{call_id}")
 
         col1, col2 = st.columns(2, gap="large")
 
@@ -90,6 +63,7 @@ def render_call_block(call_id: str, group_df: pd.DataFrame):
 
         with col2:
             st.markdown("### LLM 擷取結果")
+            st.caption(f"共擷取 {len(group_df)} 張會辦單")
 
             for _, row in group_df.iterrows():
                 render_case(row)
